@@ -11,7 +11,7 @@ The app lets a user change practical fermentation inputs and see the predicted c
 - Yeast strain preset: ale, lager, or probiotic yeast
 - Fermentation duration
 - Fermentation temperature
-- Initial fermentable sugar
+- Wort strength entered as Original Gravity, sugar/extract concentration, or an extract recipe
 - Pitch rate
 - Dissolved oxygen at pitch
 - Aeration intensity after pitch
@@ -24,7 +24,7 @@ The main outputs are:
 - Viable and dead yeast over time
 - Dissolved oxygen over time
 - Flavor retention over time
-- Final ABV, residual sugar, apparent attenuation, viability, and warning flags
+- OG, estimated FG, model ABV, brewing ABV, apparent attenuation, residual sugar, viability, and warning flags
 
 ## How To Run
 
@@ -64,6 +64,7 @@ pytest -q
 ```text
 beer_sim/
   config.py              Strain presets, kinetic parameters, SI constants
+  brewing.py             Gravity, extract, attenuation, recipe PPG, and brewing ABV helpers
   engine.py              ODE right-hand side, simulation runner, summary metrics
   state.py               State vector for substrate, cells, ethanol, oxygen, flavor, temperature
   units.py               Unit conversion helpers
@@ -139,6 +140,8 @@ ABV is estimated from ethanol concentration:
 ABV_percent = ethanol_kg_m3 / 789 * 100
 ```
 
+This is shown in the app as `Model ABV`.
+
 ### 4. Yeast Death
 
 Dead cells accumulate from viable cells:
@@ -185,6 +188,65 @@ dA/dt = -kA(T) * A
 
 The temperature dependence uses a Q10 assumption. This is intentionally simple and should be replaced with compound-specific kinetics if the app is used for a specific flavor marker.
 
+### 8. Brewing Gravity Outputs
+
+The app also reports brewing-native gravity calculations on top of the ODE simulation.
+
+Gravity points are computed from specific gravity:
+
+```text
+points = (SG - 1) * 1000
+SG = 1 + points / 1000
+```
+
+For extract or grain recipes, predicted OG is calculated from potential points per pound per gallon:
+
+```text
+gravity_points = pounds * potential_PPG * efficiency / batch_volume_gal
+OG = 1 + gravity_points / 1000
+```
+
+The included potentials are:
+
+| Fermentable | Potential |
+| --- | ---: |
+| Dry malt extract (DME) | 44 PPG |
+| Liquid malt extract (LME) | 36 PPG |
+| Base grain | 37 PPG |
+
+Dilution and boil-off use gravity-point conservation:
+
+```text
+points_1 * volume_1 = points_2 * volume_2
+```
+
+Brewing-style ABV is calculated from OG and estimated FG:
+
+```text
+ABV_percent = (OG - FG) * 131.25
+```
+
+Apparent attenuation is calculated as:
+
+```text
+attenuation = (OG - FG) / (OG - 1)
+```
+
+For display, the simulator approximates extract from SG using Plato:
+
+```text
+Plato = -616.868 + 1111.14*SG - 630.272*SG^2 + 135.997*SG^3
+extract_g_L approximately Plato * 10
+```
+
+Residual sugar from the ODE is converted back to an estimated SG curve using:
+
+```text
+SG = 1 + Plato / (258.6 - ((Plato / 258.2) * 227.1))
+```
+
+The app intentionally shows both `Model ABV`, from simulated ethanol concentration, and `Brewing ABV`, from OG-FG. These will not always match because the gravity calculation is an empirical brewing approximation while the ODE model explicitly tracks ethanol mass.
+
 ## Yeast Presets
 
 | Preset | Organism | mu_opt (h^-1) | Ks (g/L) | Operating temp (C) | CTMI Tmin/Topt/Tmax (C) | Ethanol tolerance (% ABV) | Yps |
@@ -203,7 +265,8 @@ These are representative midpoint assumptions from the ranges supplied in `SPEC.
 - Biomass is estimated from cell count using a fixed dry mass per cell.
 - Oxygen uptake is simplified and does not distinguish respiratory and fermentative phases.
 - Flavor degradation is a proxy, not a compound-specific prediction.
-- Apparent attenuation is estimated from sugar depletion, not hydrometer gravity.
+- Estimated FG is calculated from residual extract and does not yet correct for alcohol's effect on hydrometer readings.
+- Apparent attenuation is reported from estimated OG-FG gravity points.
 
 ## How To Make It More Legit
 
@@ -212,6 +275,6 @@ The next scientific improvements should be data-driven:
 - Fit ale, lager, and probiotic presets to fermentation datasets.
 - Add pH and nutrient limitation terms.
 - Add a heat-balance ODE for metabolic heat and cooling control.
-- Track original gravity, final gravity, real extract, and apparent extract.
+- Improve final gravity using real/apparent extract equations that account for ethanol density.
 - Add validation plots comparing predicted sugar, ethanol, and viable yeast to lab measurements.
 - Replace the flavor proxy with compound-specific kinetics for a selected marker.
