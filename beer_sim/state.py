@@ -25,6 +25,7 @@ class BrewState:
     higher_alcohols: float
     co2: float
     temperature: float
+    jacket_temperature: float
 
     def as_vector(self) -> NDArray[np.float64]:
         return np.array(
@@ -42,6 +43,7 @@ class BrewState:
                 self.higher_alcohols,
                 self.co2,
                 self.temperature,
+                self.jacket_temperature,
             ],
             dtype=float,
         )
@@ -62,6 +64,7 @@ class BrewState:
             higher_alcohols=max(float(values[10]), 0.0),
             co2=max(float(values[11]), 0.0),
             temperature=float(values[12]),
+            jacket_temperature=float(values[13]),
         )
 
     @property
@@ -75,6 +78,7 @@ def make_initial_state(
     biomass: float | None = None,
     dissolved_oxygen: float = 8.0e-3,
     temperature: float = 288.15,
+    jacket_temperature: float = 285.15,
     flavor_compound: float = 1.0,
 ) -> BrewState:
     """Return a starting point using SI units."""
@@ -94,6 +98,7 @@ def make_initial_state(
         higher_alcohols=0.0,
         co2=0.0,
         temperature=temperature,
+        jacket_temperature=jacket_temperature,
     )
 
 

@@ -1,7 +1,7 @@
 import pytest
 
 from beer_sim.config import SECONDS_PER_HOUR, SimulationConfig, VesselConfig
-from beer_sim.engine import ethanol_abv, simulate
+from beer_sim.engine import heat_generation_rate, heat_transfer_rate, ethanol_abv, simulate
 from beer_sim.state import make_initial_state
 
 
@@ -33,3 +33,26 @@ def test_low_temperature_slows_fermentation():
 
 def test_ethanol_abv_conversion():
     assert ethanol_abv(78.9) == pytest.approx(10.0)
+
+
+def test_dynamic_temperature_changes_wort_temperature():
+    vessel = VesselConfig(
+        dynamic_temperature=True,
+        heat_transfer_coefficient=0.0,
+        temperature=288.15,
+        jacket_temperature=288.15,
+        coolant_inlet_temperature=288.15,
+    )
+    config = SimulationConfig(duration=24.0 * SECONDS_PER_HOUR, vessel=vessel)
+    result = simulate(config=config, initial_state=make_initial_state(temperature=288.15, jacket_temperature=288.15))
+
+    assert result.summary.peak_temperature_c > 15.0
+
+
+def test_heat_generation_and_transfer_rates():
+    vessel = VesselConfig()
+
+    assert heat_generation_rate(1.0, 1.0, vessel) > 0.0
+    assert heat_transfer_rate(293.15, 288.15, vessel) == pytest.approx(
+        vessel.heat_transfer_coefficient * vessel.wall_area * 5.0
+    )

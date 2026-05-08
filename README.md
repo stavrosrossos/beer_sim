@@ -15,6 +15,7 @@ The app lets a user change practical fermentation inputs and see the predicted c
 - Pitch rate
 - Dissolved oxygen at pitch
 - Aeration intensity after pitch
+- Optional heat-balance controls: batch volume, cooling area, heat transfer coefficient, coolant temperature, coolant flow, and jacket volume
 - Advanced calibration parameters: growth multiplier, Monod/Aiba constants, biomass yield, ethanol yield, ethanol production rate, and ethanol tolerance
 
 The main outputs are:
@@ -24,6 +25,7 @@ The main outputs are:
 - Viable and dead yeast over time
 - Dissolved oxygen over time
 - CO2 production over time
+- Wort and jacket temperature over time when the heat-balance model is enabled
 - VDK/diacetyl, acetaldehyde, esters, and higher alcohol proxy curves
 - OG, estimated FG, model ABV, brewing ABV, apparent attenuation, residual sugar, viability, and warning flags
 
@@ -101,6 +103,7 @@ The ODE system tracks:
 | FA | higher_alcohols | kg/m3 | Higher alcohol proxy |
 | CO2 | co2 | kg/m3, numerically equal to g/L | Cumulative CO2 production proxy |
 | T | temperature | K | Fermentation temperature |
+| Tj | jacket_temperature | K | Cooling jacket temperature |
 
 ## Core Theory
 
@@ -272,6 +275,38 @@ SG = 1 + Plato / (258.6 - ((Plato / 258.2) * 227.1))
 
 The app intentionally shows both `Model ABV`, from simulated ethanol concentration, and `Brewing ABV`, from OG-FG. These will not always match because the gravity calculation is an empirical brewing approximation while the ODE model explicitly tracks ethanol mass.
 
+### 10. Heat Balance
+
+The app can optionally solve a lumped wort and cooling-jacket heat balance. When disabled, fermentation temperature is held fixed as an operating input. When enabled, the wort temperature becomes a dynamic state.
+
+The wort energy balance is:
+
+```text
+dT/dt = (Q_gen - Q_cool) / (rho Cp V)
+```
+
+Metabolic heat generation is estimated from extract consumption:
+
+```text
+Q_gen = ((-dS/dt) * V / M_glucose) * DeltaH_FG
+```
+
+where `DeltaH_FG = 17,500 J/mol`, `M_glucose = 0.180156 kg/mol`, `rho = 1053 kg/m3`, and `Cp = 4180 J/kg/K` by default.
+
+Cooling removal is:
+
+```text
+Q_cool = U A (T - Tj)
+```
+
+The jacket energy balance is:
+
+```text
+dTj/dt = Fc(Tc - Tj)/Vj + Q_cool/(rho_c Cp_c Vj)
+```
+
+This is a lumped model, not a CFD model. It assumes a well-mixed bulk wort temperature and a well-mixed jacket temperature. The source extraction also included a log-mean temperature difference form, but the current implementation uses `T - Tj` for stability and because jacket outlet temperature is not explicitly modeled.
+
 ## Yeast Presets
 
 | Preset | Organism | mu_max (h^-1) | Ksx (g/L) | qpmax (g/g/h) | Ksp (g/L) | Kix (L/g) | Yxs | Yps |
@@ -285,7 +320,9 @@ The W34/70 preset is the most literature-backed default from the extracted Noteb
 
 ## Current Assumptions
 
-- The fermenter is isothermal. Temperature is an input, not a solved heat-balance state.
+- By default, the fermenter is isothermal and temperature is held as an input. Heat-balance mode can be enabled in the app.
+- If heat-balance mode is enabled, the fermenter and jacket are treated as well-mixed lumped thermal masses.
+- Heat generation is estimated from extract consumption using glucose-equivalent heat of fermentation.
 - Wort extract is represented as one fermentable substrate pool.
 - pH, FAN, osmotic stress, CO2 pressure, yeast flocculation, and nutrient limitation are not yet modeled.
 - Biomass is estimated from cell count using a fixed dry mass per cell.
@@ -300,7 +337,7 @@ The W34/70 preset is the most literature-backed default from the extracted Noteb
 The next scientific improvements should be data-driven:
 
 - Fit ale, lager, and probiotic presets to fermentation datasets.
-- Add a heat-balance ODE for metabolic heat and cooling control.
+- Improve the heat-balance model with jacket outlet temperature, log-mean temperature difference, and controller logic.
 - Add pH and FAN/amino-acid limitation terms.
 - Split extract into glucose, maltose, and maltotriose uptake.
 - Add aroma partitioning and CO2 stripping losses.

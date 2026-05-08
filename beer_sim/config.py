@@ -207,9 +207,21 @@ class VesselConfig:
 
     volume: float = 0.02
     temperature: float = 288.15
+    jacket_temperature: float = 285.15
+    coolant_inlet_temperature: float = 285.15
+    jacket_volume: float = 0.005
+    coolant_flow_rate: float = 1.4 / SECONDS_PER_HOUR
+    wort_density: float = 1053.0
+    wort_heat_capacity: float = 4180.0
+    coolant_density: float = 1000.0
+    coolant_heat_capacity: float = 4180.0
+    heat_transfer_coefficient: float = 75.0
     wall_area: float = 0.25
     wall_thickness: float = 0.002
     thermal_conductivity: float = 0.6
+    heat_of_fermentation: float = 17500.0
+    glucose_molar_mass: float = 0.180156
+    dynamic_temperature: bool = False
 
 
 @dataclass(frozen=True)

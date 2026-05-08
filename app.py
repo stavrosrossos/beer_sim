@@ -49,6 +49,8 @@ def make_dataframe(result, original_gravity: float) -> pd.DataFrame:
             "Esters proxy (mg/L)": [state.esters * 1000.0 for state in result.states],
             "Higher alcohols proxy (mg/L)": [state.higher_alcohols * 1000.0 for state in result.states],
             "CO2 produced (g/L)": [state.co2 for state in result.states],
+            "Wort temperature (C)": [state.temperature - 273.15 for state in result.states],
+            "Jacket temperature (C)": [state.jacket_temperature - 273.15 for state in result.states],
         }
     )
 
@@ -101,6 +103,15 @@ with st.sidebar:
     initial_oxygen = st.slider("Dissolved oxygen at pitch (mg/L)", 0.0, 12.0, 8.0, 0.5)
     aeration_intensity = st.slider("Aeration intensity after pitch (%)", 0, 100, 20, 5)
 
+    with st.expander("Thermal Model"):
+        dynamic_temperature = st.checkbox("Solve heat-balance temperature dynamics", value=False)
+        batch_volume_l = st.slider("Batch volume (L)", 5.0, 500.0, 20.0, 5.0)
+        heat_transfer_area = st.slider("Cooling area (m2)", 0.05, 5.0, 0.25, 0.05)
+        heat_transfer_coefficient = st.slider("Heat transfer coefficient U (W/m2/K)", 0.0, 300.0, 75.0, 5.0)
+        coolant_temperature_c = st.slider("Coolant inlet temperature (C)", -5.0, 25.0, 12.0, 0.5)
+        coolant_flow_m3_h = st.slider("Coolant flow rate (m3/h)", 0.0, 2.0, 1.4, 0.1)
+        jacket_volume_l = st.slider("Jacket volume (L)", 1.0, 100.0, 5.0, 1.0)
+
     with st.expander("Calibration Parameters"):
         mu_multiplier = st.slider("Growth-rate multiplier", 0.50, 1.50, 1.00, 0.05)
         ks = st.slider("Growth saturation Ksx (g/L)", 1.0, 300.0, preset.ks, 1.0)
@@ -132,7 +143,17 @@ oxygen = OxygenTransferConfig(
     k_la=(aeration_intensity / 100.0) / SECONDS_PER_HOUR,
     saturation_concentration=10.0e-3,
 )
-vessel = VesselConfig(temperature=temperature_c + 273.15)
+vessel = VesselConfig(
+    volume=batch_volume_l / 1000.0,
+    temperature=temperature_c + 273.15,
+    jacket_temperature=coolant_temperature_c + 273.15,
+    coolant_inlet_temperature=coolant_temperature_c + 273.15,
+    jacket_volume=jacket_volume_l / 1000.0,
+    coolant_flow_rate=coolant_flow_m3_h / SECONDS_PER_HOUR,
+    wall_area=heat_transfer_area,
+    heat_transfer_coefficient=heat_transfer_coefficient,
+    dynamic_temperature=dynamic_temperature,
+)
 quality = QualityConfig()
 config = SimulationConfig(
     duration=duration_days * 24.0 * SECONDS_PER_HOUR,
@@ -147,6 +168,7 @@ initial_state = make_initial_state(
     pitch_rate=pitch_rate * 1.0e12,
     dissolved_oxygen=initial_oxygen / 1000.0,
     temperature=temperature_c + 273.15,
+    jacket_temperature=coolant_temperature_c + 273.15,
 )
 
 result = simulate(config=config, initial_state=initial_state)
@@ -178,8 +200,13 @@ flavor_metrics[1].metric("Final acetaldehyde", f"{summary.final_acetaldehyde_mg_
 flavor_metrics[2].metric("Esters proxy", f"{summary.final_esters_mg_l:.2f} mg/L")
 flavor_metrics[3].metric("Higher alcohols", f"{summary.final_higher_alcohols_mg_l:.2f} mg/L")
 
-tab_main, tab_cells, tab_quality, tab_flavor, tab_data, tab_assumptions = st.tabs(
-    ["Fermentation", "Yeast", "Oxygen & Quality", "Flavor", "Data", "Assumptions"]
+thermal_metrics = st.columns(3)
+thermal_metrics[0].metric("Peak wort temp", f"{summary.peak_temperature_c:.1f} C")
+thermal_metrics[1].metric("Final wort temp", f"{summary.final_temperature_c:.1f} C")
+thermal_metrics[2].metric("Final jacket temp", f"{summary.final_jacket_temperature_c:.1f} C")
+
+tab_main, tab_cells, tab_quality, tab_thermal, tab_flavor, tab_data, tab_assumptions = st.tabs(
+    ["Fermentation", "Yeast", "Oxygen & Quality", "Thermal", "Flavor", "Data", "Assumptions"]
 )
 
 with tab_main:
@@ -197,6 +224,19 @@ with tab_quality:
     left, right = st.columns(2)
     left.line_chart(data, x="Time (h)", y="Dissolved oxygen (mg/L)")
     right.line_chart(data, x="Time (h)", y="CO2 produced (g/L)")
+
+with tab_thermal:
+    st.line_chart(data, x="Time (h)", y=["Wort temperature (C)", "Jacket temperature (C)"])
+    st.write(
+        {
+            "Dynamic heat balance enabled": dynamic_temperature,
+            "Batch volume_L": batch_volume_l,
+            "Cooling area_m2": heat_transfer_area,
+            "U_W_m2_K": heat_transfer_coefficient,
+            "Coolant inlet_C": coolant_temperature_c,
+            "Coolant flow_m3_h": coolant_flow_m3_h,
+        }
+    )
 
 with tab_flavor:
     left, right = st.columns(2)
@@ -218,7 +258,7 @@ with tab_assumptions:
         "a biomass-specific product rate, substrate depletion is tied to biomass and ethanol yields, and "
         "secondary metabolite proxies are growth-associated with biomass-dependent cleanup for VDK and "
         "acetaldehyde. Oxygen transfer/uptake and brewing gravity calculations are included. The current "
-        "temperature is an isothermal operating input, not yet a heat-balance state."
+        "temperature can be held isothermal or solved with a lumped wort/jacket heat balance."
     )
 
     st.subheader("Gravity Basis")

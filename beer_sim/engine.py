@@ -50,6 +50,9 @@ class SimulationSummary:
     final_esters_mg_l: float
     final_higher_alcohols_mg_l: float
     final_co2_g_l: float
+    peak_temperature_c: float
+    final_temperature_c: float
+    final_jacket_temperature_c: float
     completion_time_hours: float | None
     risk_flags: tuple[str, ...]
 
@@ -108,7 +111,7 @@ def rhs(time: float, values: NDArray[np.float64], config: SimulationConfig) -> N
     d_co2 = config.quality.co2_yield * rates.substrate_consumption
     flavor_rate = config.quality.flavor_degradation_rate * flavor_temperature_factor
     d_flavor = flavor_degradation_rate(concentration=state.flavor_compound, rate_constant=flavor_rate)
-    d_temperature = 0.0
+    d_temperature, d_jacket_temperature = thermal_rates(state, rates, config)
 
     return np.array(
         [
@@ -125,6 +128,7 @@ def rhs(time: float, values: NDArray[np.float64], config: SimulationConfig) -> N
             d_higher_alcohols,
             d_co2,
             d_temperature,
+            d_jacket_temperature,
         ],
         dtype=float,
     )
@@ -205,6 +209,42 @@ def simulate(
     return SimulationResult(time=solution.t, states=states, config=config, initial_state=initial_state)
 
 
+def thermal_rates(state: BrewState, rates: RateTerms, config: SimulationConfig) -> tuple[float, float]:
+    """Return wort and jacket temperature rates in K/s."""
+
+    vessel = config.vessel
+    if not vessel.dynamic_temperature:
+        return 0.0, 0.0
+
+    heat_generation = heat_generation_rate(rates.substrate_consumption, vessel.volume, vessel)
+    heat_removed = heat_transfer_rate(state.temperature, state.jacket_temperature, vessel)
+    wort_capacity = vessel.wort_density * vessel.wort_heat_capacity * vessel.volume
+    jacket_capacity = vessel.coolant_density * vessel.coolant_heat_capacity * vessel.jacket_volume
+
+    d_temperature = (heat_generation - heat_removed) / wort_capacity
+    d_jacket_temperature = (
+        vessel.coolant_flow_rate * (vessel.coolant_inlet_temperature - state.jacket_temperature) / vessel.jacket_volume
+        + heat_removed / jacket_capacity
+    )
+    return d_temperature, d_jacket_temperature
+
+
+def heat_generation_rate(substrate_consumption: float, volume: float, vessel) -> float:
+    """Return metabolic heat generation in W from extract consumption."""
+
+    substrate_kg_s = max(substrate_consumption, 0.0) * volume
+    substrate_mol_s = substrate_kg_s / vessel.glucose_molar_mass
+    return substrate_mol_s * vessel.heat_of_fermentation
+
+
+def heat_transfer_rate(wort_temperature: float, jacket_temperature: float, vessel) -> float:
+    """Return heat removed from wort to jacket in W."""
+
+    delta_t = wort_temperature - jacket_temperature
+    ua = vessel.heat_transfer_coefficient * vessel.wall_area
+    return ua * delta_t
+
+
 def ethanol_abv(ethanol_concentration: float) -> float:
     """Convert ethanol kg/m^3 to approximate ABV percent."""
 
@@ -243,6 +283,9 @@ def summarize(result: SimulationResult) -> SimulationSummary:
         final_esters_mg_l=final.esters * 1000.0,
         final_higher_alcohols_mg_l=final.higher_alcohols * 1000.0,
         final_co2_g_l=final.co2,
+        peak_temperature_c=max(state.temperature for state in result.states) - 273.15,
+        final_temperature_c=final.temperature - 273.15,
+        final_jacket_temperature_c=final.jacket_temperature - 273.15,
         completion_time_hours=_completion_time_hours(result),
         risk_flags=tuple(_risk_flags(result, attenuation, viability)),
     )
@@ -283,6 +326,7 @@ def _risk_flags(result: SimulationResult, attenuation: float, viability: float) 
     strain = config.yeast.strain
     temperature_c = config.vessel.temperature - 273.15
     final_abv = ethanol_abv(final.ethanol)
+    peak_temperature_c = max(state.temperature for state in result.states) - 273.15
     flags: list[str] = []
 
     if initial.total_cells < 6.0e12:
@@ -301,6 +345,8 @@ def _risk_flags(result: SimulationResult, attenuation: float, viability: float) 
         flags.append("Final VDK/diacetyl proxy is above a common low sensory threshold.")
     if final.acetaldehyde * 1000.0 > 10.0:
         flags.append("Final acetaldehyde proxy is elevated; maturation may be incomplete.")
+    if config.vessel.dynamic_temperature and peak_temperature_c > strain.recommended_max_c + 2.0:
+        flags.append("Thermal model predicts temperature overshoot above the selected strain range.")
     if not flags:
         flags.append("No major process warnings from the current simplified model.")
     return flags
