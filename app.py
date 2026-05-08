@@ -39,10 +39,16 @@ def make_dataframe(result, original_gravity: float) -> pd.DataFrame:
                 abv_from_gravity(original_gravity, sg_from_extract_g_l(state.substrate))
                 for state in result.states
             ],
+            "Biomass (g/L)": [state.biomass for state in result.states],
             "Viable yeast (million cells/mL)": [state.viable_cells / 1.0e12 for state in result.states],
             "Dead yeast (million cells/mL)": [state.dead_cells / 1.0e12 for state in result.states],
             "Dissolved oxygen (mg/L)": [state.dissolved_oxygen * 1000.0 for state in result.states],
             "Flavor retention (%)": [state.flavor_compound * 100.0 for state in result.states],
+            "VDK / diacetyl proxy (mg/L)": [state.vdk * 1000.0 for state in result.states],
+            "Acetaldehyde proxy (mg/L)": [state.acetaldehyde * 1000.0 for state in result.states],
+            "Esters proxy (mg/L)": [state.esters * 1000.0 for state in result.states],
+            "Higher alcohols proxy (mg/L)": [state.higher_alcohols * 1000.0 for state in result.states],
+            "CO2 produced (g/L)": [state.co2 for state in result.states],
         }
     )
 
@@ -91,14 +97,19 @@ with st.sidebar:
         initial_sugar = extract_g_l_from_sg(original_gravity)
         st.caption(f"Predicted OG from PPG: {original_gravity:.3f}")
 
-    pitch_rate = st.slider("Pitch rate (million cells/mL)", 1.0, 30.0, 9.0, 0.5)
+    pitch_rate = st.slider("Pitch rate (million cells/mL)", 5.0, 150.0, 100.0, 5.0)
     initial_oxygen = st.slider("Dissolved oxygen at pitch (mg/L)", 0.0, 12.0, 8.0, 0.5)
     aeration_intensity = st.slider("Aeration intensity after pitch (%)", 0, 100, 20, 5)
 
     with st.expander("Calibration Parameters"):
         mu_multiplier = st.slider("Growth-rate multiplier", 0.50, 1.50, 1.00, 0.05)
-        ks = st.slider("Monod Ks (g/L)", 0.1, 2.0, preset.ks, 0.1)
-        ethanol_yield = st.slider("Ethanol yield Yps (g/g sugar)", 0.42, 0.51, preset.ethanol_yield, 0.01)
+        ks = st.slider("Growth saturation Ksx (g/L)", 1.0, 300.0, preset.ks, 1.0)
+        product_ks = st.slider("Product saturation Ksp (g/L)", 50.0, 700.0, preset.product_ks, 5.0)
+        q_pmax_h = st.slider("Max ethanol rate qpmax (g/g/h)", 0.10, 2.00, preset.q_pmax * SECONDS_PER_HOUR, 0.05)
+        biomass_yield = st.slider("Biomass yield Yxs (g/g sugar)", 0.05, 0.60, preset.biomass_yield, 0.01)
+        ethanol_yield = st.slider("Ethanol yield Yps (g/g sugar)", 0.35, 0.51, preset.ethanol_yield, 0.01)
+        ethanol_inhibition = st.slider("Aiba ethanol inhibition Kix (L/g)", 0.00, 0.20, preset.ethanol_inhibition, 0.01)
+        product_inhibition = st.slider("Product inhibition Kip (L/g)", 0.00, 0.20, preset.product_inhibition, 0.01)
         ethanol_tolerance = st.slider(
             "Ethanol tolerance (% ABV)",
             5.0,
@@ -106,13 +117,16 @@ with st.sidebar:
             preset.ethanol_tolerance_abv,
             0.5,
         )
-        sugar_uptake_multiplier = st.slider("Sugar uptake multiplier", 0.50, 1.50, 1.00, 0.05)
 
 yeast = YeastKinetics.from_preset(preset_key, mu_multiplier=mu_multiplier).with_updates(
     ks=ks,
+    product_ks=product_ks,
+    q_pmax=q_pmax_h / SECONDS_PER_HOUR,
+    biomass_yield=biomass_yield,
     ethanol_yield=ethanol_yield,
+    ethanol_inhibition=ethanol_inhibition,
+    product_inhibition=product_inhibition,
     ethanol_tolerance_abv=ethanol_tolerance,
-    sugar_uptake_rate=preset.sugar_uptake_rate * sugar_uptake_multiplier,
 )
 oxygen = OxygenTransferConfig(
     k_la=(aeration_intensity / 100.0) / SECONDS_PER_HOUR,
@@ -158,8 +172,14 @@ secondary_metrics[1].metric("25% points FG ref.", f"{estimated_fg:.3f}")
 secondary_metrics[2].metric("Viability", f"{summary.final_viability * 100.0:.0f}%")
 secondary_metrics[3].metric("Final oxygen", f"{summary.final_dissolved_oxygen_mg_l:.1f} mg/L")
 
-tab_main, tab_cells, tab_quality, tab_data, tab_assumptions = st.tabs(
-    ["Fermentation", "Yeast", "Oxygen & Quality", "Data", "Assumptions"]
+flavor_metrics = st.columns(4)
+flavor_metrics[0].metric("Peak VDK", f"{summary.peak_vdk_mg_l:.3f} mg/L")
+flavor_metrics[1].metric("Final acetaldehyde", f"{summary.final_acetaldehyde_mg_l:.2f} mg/L")
+flavor_metrics[2].metric("Esters proxy", f"{summary.final_esters_mg_l:.2f} mg/L")
+flavor_metrics[3].metric("Higher alcohols", f"{summary.final_higher_alcohols_mg_l:.2f} mg/L")
+
+tab_main, tab_cells, tab_quality, tab_flavor, tab_data, tab_assumptions = st.tabs(
+    ["Fermentation", "Yeast", "Oxygen & Quality", "Flavor", "Data", "Assumptions"]
 )
 
 with tab_main:
@@ -169,12 +189,19 @@ with tab_main:
     st.line_chart(data, x="Time (h)", y="Estimated SG")
 
 with tab_cells:
-    st.line_chart(data, x="Time (h)", y=["Viable yeast (million cells/mL)", "Dead yeast (million cells/mL)"])
+    left, right = st.columns(2)
+    left.line_chart(data, x="Time (h)", y=["Viable yeast (million cells/mL)", "Dead yeast (million cells/mL)"])
+    right.line_chart(data, x="Time (h)", y="Biomass (g/L)")
 
 with tab_quality:
     left, right = st.columns(2)
     left.line_chart(data, x="Time (h)", y="Dissolved oxygen (mg/L)")
-    right.line_chart(data, x="Time (h)", y="Flavor retention (%)")
+    right.line_chart(data, x="Time (h)", y="CO2 produced (g/L)")
+
+with tab_flavor:
+    left, right = st.columns(2)
+    left.line_chart(data, x="Time (h)", y=["VDK / diacetyl proxy (mg/L)", "Acetaldehyde proxy (mg/L)"])
+    right.line_chart(data, x="Time (h)", y=["Esters proxy (mg/L)", "Higher alcohols proxy (mg/L)"])
 
 with tab_data:
     st.dataframe(data, width="stretch")
@@ -186,11 +213,12 @@ with tab_assumptions:
 
     st.subheader("Model Basis")
     st.write(
-        "The MVP uses SI-unit ODEs for Monod substrate-limited growth, CTMI temperature response, "
-        "ethanol inhibition, stress-adjusted yeast death, sugar-to-ethanol yield, oxygen transfer and uptake, "
-        "first-order flavor degradation, and brewing gravity calculations. The simulation assumes an isothermal "
-        "fermenter and should be used for process sensitivity, education, and model calibration planning rather "
-        "than batch release decisions."
+        "The simulator uses SI-unit ODEs for a Shopska-style non-structural fermentation engine: "
+        "biomass growth follows Monod kinetics with Aiba ethanol inhibition, ethanol is produced through "
+        "a biomass-specific product rate, substrate depletion is tied to biomass and ethanol yields, and "
+        "secondary metabolite proxies are growth-associated with biomass-dependent cleanup for VDK and "
+        "acetaldehyde. Oxygen transfer/uptake and brewing gravity calculations are included. The current "
+        "temperature is an isothermal operating input, not yet a heat-balance state."
     )
 
     st.subheader("Gravity Basis")
@@ -210,7 +238,12 @@ with tab_assumptions:
         {
             "Organism": preset.organism,
             "mu_opt_h^-1": round(yeast.mu_opt * SECONDS_PER_HOUR, 3),
-            "Ks_g_L": yeast.ks,
+            "Ksx_g_L": yeast.ks,
+            "qpmax_g_g_h": round(yeast.q_pmax * SECONDS_PER_HOUR, 3),
+            "Ksp_g_L": yeast.product_ks,
+            "Kix_L_g": yeast.ethanol_inhibition,
+            "Kip_L_g": yeast.product_inhibition,
+            "Yxs_g_g": yeast.biomass_yield,
             "Base death rate_h^-1": round(yeast.base_death_rate * SECONDS_PER_HOUR, 4),
             "Lag time_h": round(yeast.lag_time / SECONDS_PER_HOUR, 1),
             "Ethanol tolerance_ABV": yeast.ethanol_tolerance_abv,

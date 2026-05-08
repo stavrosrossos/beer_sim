@@ -23,6 +23,8 @@ def main() -> None:
     print(f"Final ABV: {summary.final_abv:.2f}%")
     print(f"Apparent attenuation: {summary.attenuation * 100.0:.1f}%")
     print(f"Final viable cells: {final.viable_cells:.3e} cells/m^3")
+    print(f"Peak VDK proxy: {summary.peak_vdk_mg_l:.3f} mg/L")
+    print(f"Final esters proxy: {summary.final_esters_mg_l:.3f} mg/L")
 
 
 if __name__ == "__main__":

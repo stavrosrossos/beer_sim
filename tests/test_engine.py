@@ -10,7 +10,8 @@ def test_default_simulation_produces_positive_abv_and_summary():
 
     assert result.summary.final_abv > 0.0
     assert result.summary.attenuation > 0.5
-    assert result.summary.completion_time_hours is not None
+    assert result.summary.final_esters_mg_l > 0.0
+    assert result.summary.peak_vdk_mg_l > 0.0
 
 
 def test_low_temperature_slows_fermentation():

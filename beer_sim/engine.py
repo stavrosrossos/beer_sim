@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import numpy as np
@@ -9,17 +10,27 @@ from numpy.typing import NDArray
 from scipy.integrate import solve_ivp
 
 from beer_sim.config import ETHANOL_DENSITY_KG_M3, SECONDS_PER_HOUR, SimulationConfig
-from beer_sim.models.fermentation import ethanol_formation_rate, sugar_consumption_rate
 from beer_sim.models.growth import (
     cardinal_temperature_factor,
-    ethanol_inhibition_factor,
     lag_activity_factor,
-    monod_specific_growth_rate,
     stress_adjusted_death_rate,
 )
 from beer_sim.models.oxygen import oxygen_consumption_rate, oxygen_transfer_rate
 from beer_sim.models.quality import flavor_degradation_rate
 from beer_sim.state import BrewState, default_initial_state
+
+
+@dataclass(frozen=True)
+class RateTerms:
+    """Intermediate rate terms used by the ODE system."""
+
+    mu: float
+    q_ethanol: float
+    biomass_growth: float
+    ethanol_production: float
+    substrate_consumption: float
+    death_rate: float
+    temperature_factor: float
 
 
 @dataclass(frozen=True)
@@ -33,6 +44,12 @@ class SimulationSummary:
     final_viability: float
     final_dissolved_oxygen_mg_l: float
     flavor_retention: float
+    peak_vdk_mg_l: float
+    final_vdk_mg_l: float
+    final_acetaldehyde_mg_l: float
+    final_esters_mg_l: float
+    final_higher_alcohols_mg_l: float
+    final_co2_g_l: float
     completion_time_hours: float | None
     risk_flags: tuple[str, ...]
 
@@ -55,53 +72,14 @@ def rhs(time: float, values: NDArray[np.float64], config: SimulationConfig) -> N
     """Compute process derivatives for solve_ivp."""
 
     state = BrewState.from_vector(values)
-    viable_cells = state.viable_cells
-    strain = config.yeast.strain
-    temperature_c = state.temperature - 273.15
-    abv = ethanol_abv(state.ethanol)
+    rates = primary_metabolism_rates(time, state, config)
+    biomass_g_m3 = state.biomass * 1000.0
 
-    substrate_factor = monod_specific_growth_rate(
-        mu_max=1.0,
-        substrate=state.substrate,
-        ks=config.yeast.ks,
-    )
-    temperature_factor = cardinal_temperature_factor(
-        temperature_c,
-        strain.temperature_min_c,
-        strain.temperature_opt_c,
-        strain.temperature_max_c,
-    )
-    ethanol_factor = ethanol_inhibition_factor(abv, config.yeast.ethanol_tolerance_abv)
-    lag_factor = lag_activity_factor(time, config.yeast.lag_time)
-    carrying_capacity_factor = max(1.0 - state.total_cells / config.yeast.max_total_cells, 0.0)
-
-    mu = config.yeast.mu_opt * substrate_factor * temperature_factor * ethanol_factor * lag_factor
-    death_rate = stress_adjusted_death_rate(
-        config.yeast.base_death_rate,
-        temperature_c,
-        strain.temperature_opt_c,
-        strain.temperature_max_c,
-        abv,
-        config.yeast.ethanol_tolerance_abv,
-    )
-
-    biomass_kg_m3 = viable_cells * config.yeast.biomass_per_cell
-    biomass_g_m3 = biomass_kg_m3 * 1000.0
-
-    d_total_cells = mu * viable_cells * carrying_capacity_factor
-    d_dead_cells = death_rate * viable_cells
-    d_substrate = (
-        sugar_consumption_rate(
-            config.yeast.sugar_uptake_rate,
-            biomass_kg_m3,
-            substrate_factor,
-            temperature_factor,
-            ethanol_factor,
-        )
-        if state.substrate > 0.0
-        else 0.0
-    )
-    d_ethanol = ethanol_formation_rate(config.yeast.ethanol_yield, d_substrate)
+    d_total_cells = rates.biomass_growth / config.yeast.biomass_per_cell
+    d_dead_cells = rates.death_rate * state.viable_cells
+    d_biomass = rates.biomass_growth - rates.death_rate * state.biomass
+    d_substrate = -rates.substrate_consumption if state.substrate > 0.0 else 0.0
+    d_ethanol = rates.ethanol_production if state.substrate > 0.0 else 0.0
     d_oxygen = oxygen_transfer_rate(
         config.oxygen.k_la,
         config.oxygen.saturation_concentration,
@@ -112,9 +90,23 @@ def rhs(time: float, values: NDArray[np.float64], config: SimulationConfig) -> N
         state.dissolved_oxygen,
         config.oxygen.oxygen_half_saturation,
     )
-    flavor_rate = config.quality.flavor_degradation_rate * config.quality.flavor_q10 ** (
-        (temperature_c - 20.0) / 10.0
+
+    flavor_temperature_factor = config.quality.flavor_q10 ** ((state.temperature - 293.15) / 10.0)
+    d_vdk = (
+        config.quality.vdk_yield * rates.biomass_growth
+        - config.quality.vdk_reduction * flavor_temperature_factor * state.vdk * state.biomass
     )
+    d_acetaldehyde = (
+        config.quality.acetaldehyde_yield * rates.biomass_growth
+        - config.quality.acetaldehyde_reduction
+        * flavor_temperature_factor
+        * state.acetaldehyde
+        * state.biomass
+    )
+    d_esters = config.quality.ester_yield * rates.biomass_growth
+    d_higher_alcohols = config.quality.higher_alcohol_yield * rates.biomass_growth
+    d_co2 = config.quality.co2_yield * rates.substrate_consumption
+    flavor_rate = config.quality.flavor_degradation_rate * flavor_temperature_factor
     d_flavor = flavor_degradation_rate(concentration=state.flavor_compound, rate_constant=flavor_rate)
     d_temperature = 0.0
 
@@ -123,12 +115,65 @@ def rhs(time: float, values: NDArray[np.float64], config: SimulationConfig) -> N
             d_substrate,
             d_total_cells,
             d_dead_cells,
+            d_biomass,
             d_ethanol,
             d_oxygen,
             d_flavor,
+            d_vdk,
+            d_acetaldehyde,
+            d_esters,
+            d_higher_alcohols,
+            d_co2,
             d_temperature,
         ],
         dtype=float,
+    )
+
+
+def primary_metabolism_rates(time: float, state: BrewState, config: SimulationConfig) -> RateTerms:
+    """Return Monod/Aiba biomass, ethanol, and substrate rates."""
+
+    if state.substrate <= 0.0 or state.biomass <= 0.0:
+        return RateTerms(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+
+    substrate_factor_growth = state.substrate / (config.yeast.ks + state.substrate)
+    substrate_factor_product = state.substrate / (config.yeast.product_ks + state.substrate)
+    temperature_factor = _relative_temperature_factor(state.temperature - 273.15, config)
+    lag_factor = lag_activity_factor(time, config.yeast.lag_time)
+    growth_inhibition = math.exp(-config.yeast.ethanol_inhibition * state.ethanol)
+    product_inhibition = math.exp(-config.yeast.product_inhibition * state.ethanol)
+
+    mu = config.yeast.mu_opt * substrate_factor_growth * growth_inhibition * temperature_factor * lag_factor
+    q_ethanol = (
+        config.yeast.q_pmax
+        * substrate_factor_product
+        * product_inhibition
+        * temperature_factor
+        * lag_factor
+    )
+    biomass_growth = mu * state.biomass
+    ethanol_production = q_ethanol * state.biomass
+    substrate_consumption = (biomass_growth / config.yeast.biomass_yield) + (
+        ethanol_production / config.yeast.ethanol_yield
+    )
+    temperature_c = state.temperature - 273.15
+    death_rate = stress_adjusted_death_rate(
+        config.yeast.base_death_rate,
+        temperature_c,
+        config.yeast.strain.temperature_opt_c,
+        config.yeast.strain.temperature_max_c,
+        ethanol_abv(state.ethanol),
+        config.yeast.ethanol_tolerance_abv,
+    )
+
+    return RateTerms(
+        mu=mu,
+        q_ethanol=q_ethanol,
+        biomass_growth=biomass_growth,
+        ethanol_production=ethanol_production,
+        substrate_consumption=substrate_consumption,
+        death_rate=death_rate,
+        temperature_factor=temperature_factor,
     )
 
 
@@ -182,6 +227,7 @@ def summarize(result: SimulationResult) -> SimulationSummary:
     attenuation = apparent_attenuation(initial.substrate, final.substrate)
     viability = final.viable_cells / final.total_cells if final.total_cells > 0.0 else 0.0
     flavor_retention = final.flavor_compound / initial.flavor_compound if initial.flavor_compound > 0.0 else 0.0
+    peak_vdk = max(state.vdk for state in result.states) * 1000.0
 
     return SimulationSummary(
         final_abv=ethanol_abv(final.ethanol),
@@ -191,9 +237,34 @@ def summarize(result: SimulationResult) -> SimulationSummary:
         final_viability=viability,
         final_dissolved_oxygen_mg_l=final.dissolved_oxygen * 1000.0,
         flavor_retention=flavor_retention,
+        peak_vdk_mg_l=peak_vdk,
+        final_vdk_mg_l=final.vdk * 1000.0,
+        final_acetaldehyde_mg_l=final.acetaldehyde * 1000.0,
+        final_esters_mg_l=final.esters * 1000.0,
+        final_higher_alcohols_mg_l=final.higher_alcohols * 1000.0,
+        final_co2_g_l=final.co2,
         completion_time_hours=_completion_time_hours(result),
         risk_flags=tuple(_risk_flags(result, attenuation, viability)),
     )
+
+
+def _relative_temperature_factor(temperature_c: float, config: SimulationConfig) -> float:
+    strain = config.yeast.strain
+    current = cardinal_temperature_factor(
+        temperature_c,
+        strain.temperature_min_c,
+        strain.temperature_opt_c,
+        strain.temperature_max_c,
+    )
+    reference = cardinal_temperature_factor(
+        strain.reference_temperature_c,
+        strain.temperature_min_c,
+        strain.temperature_opt_c,
+        strain.temperature_max_c,
+    )
+    if reference <= 0.0:
+        return current
+    return min(current / reference, 2.5)
 
 
 def _completion_time_hours(result: SimulationResult) -> float | None:
@@ -226,6 +297,10 @@ def _risk_flags(result: SimulationResult, attenuation: float, viability: float) 
         flags.append("Low apparent attenuation suggests high residual sugar or slow fermentation.")
     if viability < 0.50:
         flags.append("Final yeast viability is low in this scenario.")
+    if final.vdk * 1000.0 > 0.10:
+        flags.append("Final VDK/diacetyl proxy is above a common low sensory threshold.")
+    if final.acetaldehyde * 1000.0 > 10.0:
+        flags.append("Final acetaldehyde proxy is elevated; maturation may be incomplete.")
     if not flags:
         flags.append("No major process warnings from the current simplified model.")
     return flags
